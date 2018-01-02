@@ -1,0 +1,7 @@
+## Interface: 70200
+## Title: Shrapnel
+## Notes: Shrapnel is an addon for hunters that simplifies gameplay and maximizes DPS by doing all the decision making for you
+## Author: Jpapertowels @ curse.com or Spy#1955 @ BattleTag
+## SavedVariablesPerCharacter: Shrapnel
+## Version: 7.2.0-1
+Shrapnel.lua

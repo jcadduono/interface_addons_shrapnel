@@ -1,0 +1,17 @@
+<Bindings>
+	<Binding name="Toggle Targets +" header="SHRAPNEL" category="ADDONS">
+		Shrapnel_ToggleTargetMode()
+	</Binding>
+	<Binding name="Toggle Targets -" header="SHRAPNEL" category="ADDONS">
+		Shrapnel_ToggleTargetModeReverse()
+	</Binding>
+	<Binding name="Set Targets to 1" header="SHRAPNEL" category="ADDONS">
+		Shrapnel_SetTargetMode(1)
+	</Binding>
+	<Binding name="Set Targets to 2+" header="SHRAPNEL" category="ADDONS">
+		Shrapnel_SetTargetMode(2)
+	</Binding>
+	<Binding name="Set Targets to 6+" header="SHRAPNEL" category="ADDONS">
+		Shrapnel_SetTargetMode(3)
+	</Binding>
+</Bindings>
