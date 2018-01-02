@@ -3,21 +3,62 @@ if select(2, UnitClass('player')) ~= 'HUNTER' then
 	return
 end
 
+-- useful functions
+local function startsWith(str, start) -- case insensitive check to see if a string matches the start of another string
+	if type(str) ~= 'string' then
+		return false
+	end
+   return string.lower(str:sub(1, start:len())) == start:lower()
+end
+-- end useful functions
+
 Shrapnel = {}
 
 SLASH_Shrapnel1, SLASH_Shrapnel2 = '/shrapnel', '/shr'
 BINDING_HEADER_SHRAPNEL = 'Shrapnel'
 
 local function InitializeVariables()
-	for k, v in pairs({ -- defaults
+	local function SetDefaults(t, ref)
+		for k, v in next, ref do
+			if t[k] == nil then
+				local pchar
+				if type(v) == 'boolean' then
+					pchar = v and 'true' or 'false'
+				elseif type(v) == 'table' then
+					pchar = 'table'
+				else
+					pchar = v
+				end
+				t[k] = v
+			elseif type(t[k]) == 'table' then
+				SetDefaults(t[k], v)
+			end
+		end
+	end
+	SetDefaults(Shrapnel, { -- defaults
 		locked = false,
 		snap = false,
-		scale_main = 1,
-		scale_previous = 0.7,
-		scale_cooldown = 0.7,
-		scale_trap = 0.4,
-		scale_interrupt = 0.4,
-		scale_glow = 1,
+		scale = {
+			main = 1,
+			previous = 0.7,
+			cooldown = 0.7,
+			interrupt = 0.4,
+			trap = 0.4,
+			glow = 1,
+		},
+		glow = {
+			main = true,
+			cooldown = true,
+			interrupt = false,
+			trap = true,
+			blizzard = false,
+			color = { r = 1, g = 1, b = 1 }
+		},
+		hide = {
+			bm = false,
+			mm = false,
+			sv = false
+		},
 		alpha = 1,
 		frequency = 0.05,
 		previous = true,
@@ -27,58 +68,59 @@ local function InitializeVariables()
 		gcd = true,
 		dimmer = true,
 		miss_effect = true,
-		glow_main = true,
-		glow_cooldown = true,
-		glow_trap = true,
-		glow_interrupt = false,
-		glow_blizzard = false,
-		glow_color = { r = 1, g = 1, b = 1 },
 		boss_only = false,
-		hide_bm = false,
-		hide_mm = false,
-		hide_sv = false,
-		trap = true,
 		interrupt = true,
+		trap = true,
 		single_90 = false,
 		auto_aoe = false,
 		pot = false
-	}) do
-		if Shrapnel[k] == nil then
-			Shrapnel[k] = v
-		end
-	end
+	})
 end
 
-local SPEC_NONE = 0
-local SPEC_BEAST_MASTERY = 1
-local SPEC_MARKSMANSHIP = 2
-local SPEC_SURVIVAL = 3
+-- specialization constants
+local SPEC = {
+	NONE = 0,
+	BEAST_MASTERY = 1,
+	MARKSMANSHIP = 2,
+	SURVIVAL = 3
+}
 
-local events, abilities, ability, glows = {}, {}, {}, {}
+local events, glows = {}, {}
 
 local me, abilityTimer, currentSpec, targetMode, combatStartTime = 0, 0, 0, 0, 0
 
-local T19P = 0
-local FrizzosFingertrap = false
+-- tier set equipped pieces count
+local Tier = {
+	T19P = 0,
+	T20P = 0,
+	T21P = 0
+}
+
+-- legendary item equipped
+local ItemEquipped = {
+	FrizzosFingertrap = false
+}
 
 local var = {
 	gcd = 0
 }
 
 local targetModes = {
-	[SPEC_NONE] = { {1, ''} },
-	[SPEC_BEAST_MASTERY] = {
+	[SPEC.NONE] = {
+		{1, ''}
+	},
+	[SPEC.BEAST_MASTERY] = {
 		{1, ''},
 		{2, '2+'},
 		{6, '6+'}
 	},
-	[SPEC_MARKSMANSHIP] = {
+	[SPEC.MARKSMANSHIP] = {
 		{1, ''},
 		{2, '2+'},
 		{4, '4+'},
 		{6, '6+'}
 	},
-	[SPEC_SURVIVAL] = {
+	[SPEC.SURVIVAL] = {
 		{1, ''},
 		{2, '2+'},
 		{6, '6+'}
@@ -177,7 +219,7 @@ shrapnelTrapPanel.border:SetTexture('Interface\\AddOns\\Shrapnel\\border.blp')
 shrapnelTrapPanel.cast = CreateFrame('Cooldown', nil, shrapnelTrapPanel, 'CooldownFrameTemplate')
 shrapnelTrapPanel.cast:SetAllPoints(shrapnelTrapPanel)
 
-local Ability = {}
+local Ability, abilities, abilityBySpellId = {}, {}, {}
 Ability.__index = Ability
 
 function Ability.add(spellId, buff, player, spellId2)
@@ -190,14 +232,18 @@ function Ability.add(spellId, buff, player, spellId2)
 		focus_cost = 0,
 		cooldown_duration = 0,
 		buff_duration = 0,
+		tick_interval = 0,
 		requires_charge = false,
 		requires_pet = false,
+		triggers_gcd = true,
+		hasted_duration = false,
 		known = IsPlayerSpell(spellId),
 		auraTarget = buff == 'pet' and 'pet' or buff and 'player' or 'target',
 		auraFilter = (buff and 'HELPFUL' or 'HARMFUL') .. (player and '|PLAYER' or '')
 	}
 	setmetatable(ability, Ability)
 	abilities[#abilities + 1] = ability
+	abilityBySpellId[spellId] = ability
 	return ability
 end
 
@@ -219,9 +265,15 @@ function Ability:usable(seconds)
 end
 
 function Ability:remains()
+	if self.buff_duration > 0 and self:casting() then
+		return self:duration()
+	end
 	local _, id, expires
 	for i = 1, 40 do
 		_, _, _, _, _, _, expires, _, _, _, id = UnitAura(self.auraTarget, i, self.auraFilter)
+		if not id then
+			return 0
+		end
 		if id == self.spellId or id == self.spellId2 then
 			return max(expires - var.time - var.cast_remains, 0)
 		end
@@ -231,39 +283,48 @@ end
 
 function Ability:refreshable()
 	if self.buff_duration > 0 then
-		return self:remains() < self.buff_duration * 0.3
+		return self:remains() < self:duration() * 0.3
 	end
 	return self:down()
 end
 
-function Ability:up()
+function Ability:up(excludeCasting)
+	if not excludeCasting and self.buff_duration > 0 and self:casting() then
+		return true
+	end
 	local _, id, expires
 	for i = 1, 40 do
 		_, _, _, _, _, _, expires, _, _, _, id = UnitAura(self.auraTarget, i, self.auraFilter)
+		if not id then
+			return false
+		end
 		if id == self.spellId or id == self.spellId2 then
-			return expires - var.time > var.cast_remains
+			return expires == 0 or expires - var.time > var.cast_remains
 		end
 	end
 end
 
-function Ability:down()
-	return not self:up()
+function Ability:down(excludeCasting)
+	return not self:up(excludeCasting)
 end
 
 function Ability:cooldown()
 	if self.cooldown_duration > 0 and self:casting() then
-		return self.cooldown_duration + var.cast_remains
+		return self.cooldown_duration
 	end
 	local start, duration = GetSpellCooldown(self.spellId)
-	return start > 0 and max(0, (duration - (var.time - start))) - var.cast_remains or 0
+	return start > 0 and max(0, (duration - (var.time - start)) - var.cast_remains) or 0
 end
 
 function Ability:stack()
 	local _, id, expires, count
 	for i = 1, 40 do
 		_, _, _, count, _, _, expires, _, _, _, id = UnitAura(self.auraTarget, i, self.auraFilter)
+		if not id then
+			return 0
+		end
 		if id == self.spellId or id == self.spellId2 then
-			return expires - var.time > var.cast_remains and count or 0
+			return (expires == 0 or expires - var.time > var.cast_remains) and count or 0
 		end
 	end
 	return 0
@@ -277,8 +338,16 @@ function Ability:charges()
 	return GetSpellCharges(self.spellId) or 0
 end
 
+function Ability:duration()
+	return self.hasted_duration and (var.haste_factor * self.buff_duration) or self.buff_duration
+end
+
 function Ability:casting()
-	return var.cast_name == self.name or var.execute_name == self.name
+	return var.cast_name == self.name
+end
+
+function Ability:channeling()
+	return UnitChannelInfo('player') == self.name
 end
 
 function Ability:castTime()
@@ -288,6 +357,17 @@ end
 
 function Ability:castRegen()
 	return var.regen * max(1, self:castTime())
+end
+
+function Ability:tickInterval()
+	return self.tick_interval - (self.tick_interval * (UnitSpellHaste('player') / 100))
+end
+
+function Ability:previous()
+	if self:casting() or self:channeling() then
+		return true
+	end
+	return var.last_gcd == self or var.last_ability == self
 end
 
 function Ability:recordTargetsHit()
@@ -387,7 +467,7 @@ DragonsfireGrenade.buff_duration = 8
 local ExplosiveTrap = Ability.add(191433, false, true, 13812)
 ExplosiveTrap.buff_duration = 10
 local FlankingStrike = Ability.add(202800, false, true)
-FlankingStrike.focus_cost = 45
+FlankingStrike.focus_cost = 50
 FlankingStrike.requires_pet = true
 local FuryOfTheEagle = Ability.add(203415, false, true)
 local Harpoon = Ability.add(190925, false, true, 190927)
@@ -417,6 +497,10 @@ local MokNathalTactics = WaysOfTheMokNathal
 
 -- Tier Bonuses
 local T19Survival4P = Ability.add(211357, true, true, 211362)
+-- Racials
+local ArcaneTorrent = Ability.add(80483, true, false) -- Blood Elf
+ArcaneTorrent.focus_cost = -15
+ArcaneTorrent.triggers_gcd = false
 -- Potions
 local ProlongedPower = Ability.add(229206, true, true)
 -- Trinkets
@@ -445,22 +529,17 @@ end
 
 local function UpdateVars()
 	local _, start, duration, remains, hp
-	ability.last_main = ability.main
-	ability.last_trap = ability.trap
-	ability.last_cd = ability.cd
+	var.last_main = var.main
+	var.last_cd = var.cd
+	var.last_trap = var.trap
 	var.time = GetTime()
 	var.gcd = 1.5 - (1.5 * (UnitSpellHaste('player') / 100))
 	start, duration = GetSpellCooldown(EagleEye.spellId)
 	var.gcd_remains = start > 0 and duration - (var.time - start) or 0
-	if var.execute_name and var.gcd_remains < 0.2 then
-		var.execute_name = nil
-	end
 	var.cast_name, _, _, _, _, remains = UnitCastingInfo('player')
-	if not remains then
-		var.cast_name, _, _, _, _, remains = UnitChannelInfo('player')
-	end
 	var.cast_remains = remains and remains / 1000 - var.time or var.gcd_remains
 	var.cast_ability = GetAbilityCasting()
+	var.haste_factor = 1 / (1 + UnitSpellHaste('player') / 100)
 	var.regen = GetPowerRegen()
 	var.focus_regen = GetCastRegen()
 	var.focus_max = UnitPowerMax('player')
@@ -488,12 +567,20 @@ local function FocusMax()
 	return var.focus_max
 end
 
+local function HasteFactor()
+	return var.haste_factor
+end
+
 local function GCD()
 	return var.gcd
 end
 
 local function GCDRemains()
 	return var.gcd_remains
+end
+
+local function PlayerIsMoving()
+	return GetUnitSpeed('player') ~= 0
 end
 
 local function Enemies()
@@ -519,12 +606,16 @@ local function BloodlustActive()
 	end
 end
 
-local function UseCooldown(overwrite)
-	return Shrapnel.cooldown and (not Shrapnel.boss_only or Target.boss) and (not ability.cd or overwrite)
+local function UseCooldown(ability, overwrite, always)
+	if always or (Shrapnel.cooldown and (not Shrapnel.boss_only or Target.boss) and (not var.cd or overwrite)) then
+		var.cd = ability
+	end
 end
 
-local function UseTrap(overwrite)
-	return Shrapnel.trap and (not ability.trap or overwrite)
+local function UseTrap(ability, overwrite)
+	if Shrapnel.trap and (not var.trap or overwrite) then
+		var.trap = ability
+	end
 end
 
 local function DetermineAbilityBeastMastery()
@@ -586,6 +677,7 @@ local function DetermineAbilityBeastMastery()
 ]]
 end
 
+--[[
 local MM_Var = {
 	TrueshotCooldown = 0,
 	PoolingForPiercing = false,
@@ -712,8 +804,10 @@ local function APL_MM_TargetDie()
 		return ArcaneShot
 	end
 end
+]]
 
 local function DetermineAbilityMarksmanship()
+--[[
 	--if UseCooldown() and Volley.known and Volley:down() then
 	--	ability.cd = Volley
 	--end
@@ -722,8 +816,8 @@ local function DetermineAbilityMarksmanship()
 	if TimeInCombat() > 15 and Trueshot:ready() and MM_Var.TrueshotCooldown == 0 then
 		MM_Var.TrueshotCooldown = TimeInCombat() * 1.1
 	end
-	if UseCooldown() and Trueshot:ready() and (MM_Var.TrueshotCooldown == 0 or BloodlustActive() or (MM_Var.TrueshotCooldown > 0 and Target.timeToDie > (MM_Var.TrueshotCooldown + 15)) or Bullseye:stack() > 25 or Target.timeToDie < 16) then
-		ability.cd = Trueshot
+	if Trueshot:ready() and (MM_Var.TrueshotCooldown == 0 or BloodlustActive() or (MM_Var.TrueshotCooldown > 0 and Target.timeToDie > (MM_Var.TrueshotCooldown + 15)) or Bullseye:stack() > 25 or Target.timeToDie < 16) then
+		UseCooldown(Trueshot)
 	end
 	if Enemies() == 1 and Target.timeToDie < 6 then
 		return APL_MM_TargetDie()
@@ -732,6 +826,7 @@ local function DetermineAbilityMarksmanship()
 		return APL_MM_PatientSniper()
 	end
 	return APL_MM_NonPatientSniper()
+]]
 end
 
 local function DetermineAbilitySurvivalMokNathal()
@@ -750,14 +845,14 @@ local function DetermineAbilitySurvivalMokNathal()
 	if FuryOfTheEagle:ready() and MongooseFury:remains() < (GCD() + 0.4) and MongooseFury:stack() >= 4 and MokNathalTactics:remains() > 4 then
 		return FuryOfTheEagle
 	end
-	if UseCooldown() and SnakeHunter.known and SnakeHunter:ready() and MongooseBite:charges() == 0 and MongooseFury:remains() > 3 * GCD() and TimeInCombat() > 15 then
-		ability.cd = SnakeHunter
+	if SnakeHunter.known and SnakeHunter:ready() and MongooseBite:charges() == 0 and MongooseFury:remains() > 3 * GCD() and TimeInCombat() > 15 then
+		UseCooldown(SnakeHunter)
 	end
-	if UseCooldown() and SpittingCobra.known and SpittingCobra:ready() and MongooseFury:remains() >= GCD() and MongooseFury:stack() < 4 and MokNathalTactics:stack() >= 3 then
-		ability.cd = SpittingCobra
+	if SpittingCobra.known and SpittingCobra:ready() and MongooseFury:remains() >= GCD() and MongooseFury:stack() < 4 and MokNathalTactics:stack() >= 3 then
+		UseCooldown(SpittingCobra)
 	end
-	if UseTrap() and SteelTrap.known and SteelTrap:ready() and Target.timeToDie > 6 and MongooseFury:down() then
-		ability.trap = SteelTrap
+	if SteelTrap.known and SteelTrap:ready() and Target.timeToDie > 6 and MongooseFury:down() then
+		UseTrap(SteelTrap)
 	end
 	if AMurderOfCrowsSV.known and AMurderOfCrowsSV:ready() and Target.timeToDie > 6 and Focus() > (55 - MokNathalTactics:remains() * FocusRegen()) and MongooseFury:stack() < 4 and MongooseFury:remains() >= GCD() then
 		return AMurderOfCrowsSV
@@ -765,7 +860,7 @@ local function DetermineAbilitySurvivalMokNathal()
 	if FlankingStrike:usable() and MongooseBite:charges() <= 1 and Focus() > (75 - MokNathalTactics:remains() * FocusRegen()) then
 		return FlankingStrike
 	end
-	if FrizzosFingertrap and Lacerate:up() and Lacerate:refreshable() and Focus() > (65 - MokNathalTactics:remains() * FocusRegen()) and MongooseFury:remains() >= GCD() then
+	if ItemEquipped.FrizzosFingertrap and Lacerate:up() and Lacerate:refreshable() and Focus() > (65 - MokNathalTactics:remains() * FocusRegen()) and MongooseFury:remains() >= GCD() then
 		if Butchery.known then
 			if Butchery:usable() then
 				return Butchery
@@ -784,11 +879,11 @@ local function DetermineAbilitySurvivalMokNathal()
 			return Lacerate
 		end
 	end
-	if UseTrap() and Caltrops.known and Caltrops:ready() and (Enemies() > 1 or Target.timeToDie > 8) and Caltrops:down() and MongooseFury:down() then
-		ability.trap = Caltrops
+	if Caltrops.known and Caltrops:ready() and (Enemies() > 1 or Target.timeToDie > 8) and Caltrops:down() and MongooseFury:down() then
+		UseTrap(Caltrops)
 	end
-	if UseTrap() and ExplosiveTrap:ready() and (Enemies() > 1 or Target.timeToDie > 4) and MongooseFury:down() and MongooseBite:charges() == 0 then
-		ability.trap = ExplosiveTrap
+	if ExplosiveTrap:ready() and (Enemies() > 1 or Target.timeToDie > 4) and MongooseFury:down() and MongooseBite:charges() == 0 then
+		UseTrap(ExplosiveTrap)
 	end
 	if Enemies() > 1 and Focus() > (65 - MokNathalTactics:remains() * FocusRegen()) then
 		if Butchery.known then
@@ -804,8 +899,8 @@ local function DetermineAbilitySurvivalMokNathal()
 	if RaptorStrike:usable() and MokNathalTactics:stack() == 2 then
 		return RaptorStrike
 	end
-	if UseTrap() and DragonsfireGrenade.known and DragonsfireGrenade:ready() and MongooseFury:down() then
-		ability.trap = DragonsfireGrenade
+	if DragonsfireGrenade.known and DragonsfireGrenade:ready() and MongooseFury:down() then
+		UseTrap(DragonsfireGrenade)
 	end
 	if FuryOfTheEagle:ready() and MokNathalTactics:remains() > 4 and MongooseFury:stack() == 6 then
 		return FuryOfTheEagle
@@ -819,29 +914,27 @@ local function DetermineAbilitySurvivalMokNathal()
 	if MongooseFury:up() and MongooseFury:remains() <= (3 * GCD()) and MokNathalTactics:remains() < (4 + GCD()) and FuryOfTheEagle:cooldown() < GCD() then
 		return RaptorStrike
 	end
-	if UseCooldown() and AspectOfTheEagle:ready() and ((MongooseFury:stack() > 4 and TimeInCombat() < 15) or (MongooseFury:stack() > 1 and TimeInCombat() > 15) or (MongooseFury:remains() > 6 and MongooseBite:charges() < 2)) then
-		ability.cd = AspectOfTheEagle
+	if AspectOfTheEagle:ready() and ((MongooseFury:stack() > 4 and TimeInCombat() < 15) or (MongooseFury:stack() > 1 and TimeInCombat() > 15) or (MongooseFury:remains() > 6 and MongooseBite:charges() < 2)) then
+		UseCooldown(AspectOfTheEagle)
 	end
 	if MongooseBite:usable() and MongooseFury:up() and MongooseFury:remains() < AspectOfTheEagle:cooldown() then
 		return MongooseBite
 	end
-	if UseCooldown() and SpittingCobra:ready() then
-		ability.cd = SpittingCobra
+	if SpittingCobra.known and SpittingCobra:ready() then
+		UseCooldown(SpittingCobra)
 	end
-	if UseTrap() and SteelTrap.known and SteelTrap:ready() and Target.timeToDie > 6 then
-		ability.trap = SteelTrap
+	if SteelTrap.known and SteelTrap:ready() and Target.timeToDie > 6 then
+		UseTrap(SteelTrap)
 	end
 	if AMurderOfCrowsSV.known and AMurderOfCrowsSV:usable() and Target.timeToDie > 6 and Focus() > (55 - MokNathalTactics:remains() * FocusRegen()) then
 		return AMurderOfCrowsSV
 	end
-	if UseTrap() then
-		if Caltrops.known and Caltrops:ready() and Caltrops:down() and (Enemies() > 1 or Target.timeToDie > 8) then
-			ability.trap = Caltrops
-		elseif ExplosiveTrap:ready() and (Enemies() > 1 or Target.timeToDie > 4) then
-			ability.trap = ExplosiveTrap
-		end
+	if Caltrops.known and Caltrops:ready() and Caltrops:down() and (Enemies() > 1 or Target.timeToDie > 8) then
+		UseTrap(Caltrops)
+	elseif ExplosiveTrap:ready() and (Enemies() > 1 or Target.timeToDie > 4) then
+		UseTrap(ExplosiveTrap)
 	end
-	if FrizzosFingertrap and Lacerate:up() and Lacerate:refreshable() and Focus() > (65 - MokNathalTactics:remains() * FocusRegen()) then
+	if ItemEquipped.FrizzosFingertrap and Lacerate:up() and Lacerate:refreshable() and Focus() > (65 - MokNathalTactics:remains() * FocusRegen()) then
 		if Butchery.known then
 			if Butchery:usable() then
 				return Butchery
@@ -855,8 +948,8 @@ local function DetermineAbilitySurvivalMokNathal()
 	if Lacerate:usable() and Lacerate:refreshable() and Target.timeToDie > Lacerate:remains() + 6 and Focus() > (55 - MokNathalTactics:remains() * FocusRegen()) then
 		return Lacerate
 	end
-	if UseTrap() and DragonsfireGrenade.known and DragonsfireGrenade:ready() then
-		ability.trap = DragonsfireGrenade
+	if DragonsfireGrenade.known and DragonsfireGrenade:ready() then
+		UseTrap(DragonsfireGrenade)
 	end
 	if MongooseBite:ready() and (MongooseBite:charges() >= 3 or (MongooseBite:charges() == 2 and MongooseBite:cooldown() <= GCD())) then
 		return MongooseBite
@@ -864,10 +957,10 @@ local function DetermineAbilitySurvivalMokNathal()
 	if FlankingStrike:usable() then
 		return FlankingStrike
 	end
-	if UseCooldown() and OnTheTrail:down() and Harpoon:ready() then
-		ability.cd = Harpoon
+	if OnTheTrail:down() and Harpoon:ready() then
+		UseCooldown(Harpoon)
 	end
-	if Butchery.known and Butchery:usable() and (Focus() > (65 - MokNathalTactics:remains() * FocusRegen()) or (Enemies() == 1 and Target.timeToDie < 2)) then
+	if Butchery.known and Butchery:usable() and (Enemies() > 1 or Shrapnel.single_90) and (Focus() > (65 - MokNathalTactics:remains() * FocusRegen()) or (Enemies() == 1 and Target.timeToDie < 2)) then
 		return Butchery
 	end
 	if RaptorStrike:usable() and (Focus() > (75 - FlankingStrike:cooldown() * FocusRegen()) or (Enemies() == 1 and Target.timeToDie < 2)) then
@@ -876,44 +969,48 @@ local function DetermineAbilitySurvivalMokNathal()
 end
 
 local function DetermineAbilitySurvival()
-	if TimeInCombat() == 0 and UseCooldown() and OnTheTrail:down() and Harpoon:ready() then
-		ability.cd = Harpoon
+	if TimeInCombat() == 0 and OnTheTrail:down() and Harpoon:ready() then
+		UseCooldown(Harpoon)
 	end
 	return DetermineAbilitySurvivalMokNathal()
 end
 
 local function DetermineAbility()
-	ability.cd = nil
-	ability.trap = nil
-	if currentSpec == SPEC_BEAST_MASTERY then
+	var.cd = nil
+	var.interrupt = nil
+	var.trap = nil
+	if currentSpec == SPEC.BEAST_MASTERY then
 		return DetermineAbilityBeastMastery()
-	elseif currentSpec == SPEC_MARKSMANSHIP then
+	elseif currentSpec == SPEC.MARKSMANSHIP then
 		return DetermineAbilityMarksmanship()
-	elseif currentSpec == SPEC_SURVIVAL then
+	elseif currentSpec == SPEC.SURVIVAL then
 		return DetermineAbilitySurvival()
 	end
 	shrapnelPreviousPanel:Hide()
 end
 
 local function DetermineInterrupt()
-	if CounterShot.known then
-		return CounterShot:ready() and CounterShot
+	if CounterShot.known and CounterShot:ready() then
+		return CounterShot
 	end
-	if Muzzle.known then
-		return Muzzle:ready() and Muzzle
+	if Muzzle.known and Muzzle:ready() then
+		return Muzzle
+	end
+	if ArcaneTorrent.known and ArcaneTorrent:ready() then
+		return ArcaneTorrent
 	end
 end
 
 local function UpdateInterrupt()
 	local _, _, _, _, start, ends, _, _, notInterruptible = UnitCastingInfo('target')
 	if not start or notInterruptible then
-		ability.interrupt = nil
+		var.interrupt = nil
 		shrapnelInterruptPanel:Hide()
 		return
 	end
-	ability.interrupt = DetermineInterrupt()
-	if ability.interrupt then
-		shrapnelInterruptPanel.icon:SetTexture(ability.interrupt.icon)
+	var.interrupt = DetermineInterrupt()
+	if var.interrupt then
+		shrapnelInterruptPanel.icon:SetTexture(var.interrupt.icon)
 		shrapnelInterruptPanel.icon:Show()
 		shrapnelInterruptPanel.border:Show()
 	else
@@ -925,7 +1022,7 @@ local function UpdateInterrupt()
 end
 
 local function DenyOverlayGlow(actionButton)
-	if not Shrapnel.glow_blizzard then
+	if not Shrapnel.glow.blizzard then
 		actionButton.overlay:Hide()
 	end
 end
@@ -934,15 +1031,15 @@ hooksecurefunc('ActionButton_ShowOverlayGlow', DenyOverlayGlow) -- Disable Blizz
 
 local function UpdateGlowColorAndScale()
 	local w, h, glow
-	local r = Shrapnel.glow_color.r
-	local g = Shrapnel.glow_color.g
-	local b = Shrapnel.glow_color.b
+	local r = Shrapnel.glow.color.r
+	local g = Shrapnel.glow.color.g
+	local b = Shrapnel.glow.color.b
 	for i = 1, #glows do
 		glow = glows[i]
 		w, h = glow.button:GetSize()
 		glow:SetSize(w * 1.4, h * 1.4)
-		glow:SetPoint('TOPLEFT', glow.button, 'TOPLEFT', -w * 0.2 * Shrapnel.scale_glow, h * 0.2 * Shrapnel.scale_glow)
-		glow:SetPoint('BOTTOMRIGHT', glow.button, 'BOTTOMRIGHT', w * 0.2 * Shrapnel.scale_glow, -h * 0.2 * Shrapnel.scale_glow)
+		glow:SetPoint('TOPLEFT', glow.button, 'TOPLEFT', -w * 0.2 * Shrapnel.scale.glow, h * 0.2 * Shrapnel.scale.glow)
+		glow:SetPoint('BOTTOMRIGHT', glow.button, 'BOTTOMRIGHT', w * 0.2 * Shrapnel.scale.glow, -h * 0.2 * Shrapnel.scale.glow)
 		glow.spark:SetVertexColor(r, g, b)
 		glow.innerGlow:SetVertexColor(r, g, b)
 		glow.innerGlowOver:SetVertexColor(r, g, b)
@@ -994,10 +1091,10 @@ local function UpdateGlows()
 		glow = glows[i]
 		icon = glow.button.icon:GetTexture()
 		if icon and glow.button.icon:IsVisible() and (
-			(Shrapnel.glow_main and ability.main and icon == ability.main.icon) or
-			(Shrapnel.glow_cooldown and ability.cd and icon == ability.cd.icon) or
-			(Shrapnel.glow_trap and ability.trap and icon == ability.trap.icon) or
-			(Shrapnel.glow_interrupt and ability.interrupt and icon == ability.interrupt.icon)
+			(Shrapnel.glow.main and var.main and icon == var.main.icon) or
+			(Shrapnel.glow.cooldown and var.cd and icon == var.cd.icon) or
+			(Shrapnel.glow.interrupt and var.interrupt and icon == var.interrupt.icon) or
+			(Shrapnel.glow.trap and var.trap and icon == var.trap.icon)
 			) then
 			if not glow:IsVisible() then
 				glow.animIn:Play()
@@ -1016,27 +1113,31 @@ end
 function events:PLAYER_LOGIN()
 	me = UnitGUID('player')
 	CreateOverlayGlows()
+	if Shrapnel.snap then
+		shrapnelPanel:ClearAllPoints()
+		shrapnelPanel:SetPoint('CENTER', 0, -169)
+	end
 end
 
 local function ShouldHide()
-	return (currentSpec == SPEC_NONE or
-		   (currentSpec == SPEC_BEAST_MASTERY and Shrapnel.hide_bm) or
-		   (currentSpec == SPEC_MARKSMANSHIP and Shrapnel.hide_mm) or
-		   (currentSpec == SPEC_SURVIVAL and Shrapnel.hide_sv))
+	return (currentSpec == SPEC.NONE or
+		   (currentSpec == SPEC.BEAST_MASTERY and Shrapnel.hide.bm) or
+		   (currentSpec == SPEC.MARKSMANSHIP and Shrapnel.hide.mm) or
+		   (currentSpec == SPEC.SURVIVAL and Shrapnel.hide.sv))
 end
 
 local function Disappear()
-	ability.main = nil
-	ability.cd = nil
-	ability.trap = nil
-	ability.interrupt = nil
+	var.main = nil
+	var.cd = nil
+	var.interrupt = nil
+	var.trap = nil
 	UpdateGlows()
 	shrapnelPanel:Hide()
 	shrapnelPanel.border:Hide()
 	shrapnelPreviousPanel:Hide()
 	shrapnelCooldownPanel:Hide()
-	shrapnelTrapPanel:Hide()
 	shrapnelInterruptPanel:Hide()
+	shrapnelTrapPanel:Hide()
 end
 
 function Shrapnel_ToggleTargetMode()
@@ -1055,10 +1156,21 @@ function Shrapnel_SetTargetMode(mode)
 end
 
 function Equipped(name, slot)
-	local ilink = GetInventoryItemLink('player', slot)
-	if ilink then
-		local iname = ilink:match('%[(.*)%]')
-		return iname and iname:find(name) and true or false
+	local function SlotMatches(name, slot)
+		local ilink = GetInventoryItemLink('player', slot)
+		if ilink then
+			local iname = ilink:match('%[(.*)%]')
+			return (iname and iname:find(name))
+		end
+		return false
+	end
+	if slot then
+		return SlotMatches(name, slot)
+	end
+	for slot = 1, 19 do
+		if SlotMatches(name, slot) then
+			return true
+		end
 	end
 	return false
 end
@@ -1087,8 +1199,8 @@ local function UpdateDraggable()
 		shrapnelPanel:RegisterForDrag(nil)
 		shrapnelPreviousPanel:EnableMouse(false)
 		shrapnelCooldownPanel:EnableMouse(false)
-		shrapnelTrapPanel:EnableMouse(false)
 		shrapnelInterruptPanel:EnableMouse(false)
+		shrapnelTrapPanel:EnableMouse(false)
 	else
 		if not Shrapnel.aoe then
 			shrapnelPanel:SetScript('OnDragStart', shrapnelPanel.StartMoving)
@@ -1097,33 +1209,37 @@ local function UpdateDraggable()
 		end
 		shrapnelPreviousPanel:EnableMouse(true)
 		shrapnelCooldownPanel:EnableMouse(true)
-		shrapnelTrapPanel:EnableMouse(true)
 		shrapnelInterruptPanel:EnableMouse(true)
+		shrapnelTrapPanel:EnableMouse(true)
 	end
 end
 
-local function ResourceFrameHide()
+local function OnResourceFrameHide()
 	if Shrapnel.snap then
 		shrapnelPanel:ClearAllPoints()
 	end
 end
 
-local function ResourceFrameShow()
+local function OnResourceFrameShow()
 	if Shrapnel.snap then
 		shrapnelPanel:ClearAllPoints()
-		shrapnelPanel:SetPoint('TOP', NamePlatePlayerResourceFrame, 'BOTTOM', 0, -16)
+		if Shrapnel.snap == 'above' then
+			shrapnelPanel:SetPoint('BOTTOM', NamePlatePlayerResourceFrame, 'TOP', 0, 42)
+		elseif Shrapnel.snap == 'below' then
+			shrapnelPanel:SetPoint('TOP', NamePlatePlayerResourceFrame, 'BOTTOM', 0, -16)
+		end
 	end
 end
 
-NamePlatePlayerResourceFrame:HookScript("OnHide", ResourceFrameHide)
-NamePlatePlayerResourceFrame:HookScript("OnShow", ResourceFrameShow)
+NamePlatePlayerResourceFrame:HookScript("OnHide", OnResourceFrameHide)
+NamePlatePlayerResourceFrame:HookScript("OnShow", OnResourceFrameShow)
 
 local function UpdateAlpha()
 	shrapnelPanel:SetAlpha(Shrapnel.alpha)
 	shrapnelPreviousPanel:SetAlpha(Shrapnel.alpha)
 	shrapnelCooldownPanel:SetAlpha(Shrapnel.alpha)
-	shrapnelTrapPanel:SetAlpha(Shrapnel.alpha)
 	shrapnelInterruptPanel:SetAlpha(Shrapnel.alpha)
+	shrapnelTrapPanel:SetAlpha(Shrapnel.alpha)
 end
 
 local function UpdateHealthArray()
@@ -1135,10 +1251,10 @@ end
 
 local function UpdateCombat()
 	UpdateVars()
-	ability.main = DetermineAbility()
-	if ability.main ~= ability.last_main then
-		if ability.main then
-			shrapnelPanel.icon:SetTexture(ability.main.icon)
+	var.main = DetermineAbility()
+	if var.main ~= var.last_main then
+		if var.main then
+			shrapnelPanel.icon:SetTexture(var.main.icon)
 			shrapnelPanel.icon:Show()
 			shrapnelPanel.border:Show()
 		else
@@ -1146,17 +1262,17 @@ local function UpdateCombat()
 			shrapnelPanel.border:Hide()
 		end
 	end
-	if ability.cd ~= ability.last_cd then
-		if ability.cd then
-			shrapnelCooldownPanel.icon:SetTexture(ability.cd.icon)
+	if var.cd ~= var.last_cd then
+		if var.cd then
+			shrapnelCooldownPanel.icon:SetTexture(var.cd.icon)
 			shrapnelCooldownPanel:Show()
 		else
 			shrapnelCooldownPanel:Hide()
 		end
 	end
-	if ability.trap ~= ability.last_trap then
-		if ability.trap then
-			shrapnelTrapPanel.icon:SetTexture(ability.trap.icon)
+	if var.trap ~= var.last_trap then
+		if var.trap then
+			shrapnelTrapPanel.icon:SetTexture(var.trap.icon)
 			shrapnelTrapPanel:Show()
 		else
 			shrapnelTrapPanel:Hide()
@@ -1172,7 +1288,7 @@ local function UpdateCombat()
 		end
 	end
 	if Shrapnel.dimmer then
-		if not ability.main or IsUsableSpell(ability.main.spellId) then
+		if not var.main or IsUsableSpell(var.main.spellId) then
 			shrapnelPanel.dimmer:Hide()
 		else
 			shrapnelPanel.dimmer:Show()
@@ -1198,86 +1314,119 @@ function events:ADDON_LOADED(name)
 		UpdateHealthArray()
 		UpdateDraggable()
 		UpdateAlpha()
-		shrapnelPanel:SetScale(Shrapnel.scale_main)
-		shrapnelPreviousPanel:SetScale(Shrapnel.scale_previous)
-		shrapnelCooldownPanel:SetScale(Shrapnel.scale_cooldown)
-		shrapnelTrapPanel:SetScale(Shrapnel.scale_trap)
-		shrapnelInterruptPanel:SetScale(Shrapnel.scale_interrupt)
+		shrapnelPanel:SetScale(Shrapnel.scale.main)
+		shrapnelPreviousPanel:SetScale(Shrapnel.scale.previous)
+		shrapnelCooldownPanel:SetScale(Shrapnel.scale.cooldown)
+		shrapnelInterruptPanel:SetScale(Shrapnel.scale.interrupt)
+		shrapnelTrapPanel:SetScale(Shrapnel.scale.trap)
 	end
 end
 
 function events:COMBAT_LOG_EVENT_UNFILTERED(self, eventType, hideCaster, srcGUID, srcName, srcFlags, srcRaidFlags, dstGUID, dstName, dstFlags, dstRaidFlags, spellId, spellName)
-	if srcGUID == me and Shrapnel.previous and shrapnelPanel:IsVisible() then
-		if eventType == 'SPELL_MISSED' and Shrapnel.miss_effect and ability.previous and spellId == ability.previous.spellId then
-			shrapnelPreviousPanel.border:SetTexture('Interface\\AddOns\\Shrapnel\\misseffect.blp')
-		elseif eventType == 'SPELL_CAST_SUCCESS' then
-			var.execute_name = spellName
-			if ability.main and spellId == ability.main.spellId then
-				ability.previous = ability.main
+	if srcGUID ~= me then
+		return
+	end
+	if eventType == 'SPELL_CAST_SUCCESS' then
+		local castedAbility = abilityBySpellId[spellId]
+		if castedAbility then
+			var.last_ability = castedAbility
+			if var.last_ability.triggers_gcd then
+				var.last_gcd = var.last_ability
+			end
+			if Shrapnel.previous and shrapnelPanel:IsVisible() then
 				shrapnelPreviousPanel.border:SetTexture('Interface\\AddOns\\Shrapnel\\border.blp')
-				shrapnelPreviousPanel.icon:SetTexture(ability.previous.icon)
+				shrapnelPreviousPanel.icon:SetTexture(var.last_ability.icon)
 				shrapnelPreviousPanel:Show()
 			end
 		end
 		if Shrapnel.auto_aoe then
-			if eventType == 'SPELL_CAST_SUCCESS' then
-				if spellId == ArcaneShot.spellId then
-					Shrapnel_SetTargetMode(1)
-				elseif spellId == MultiShot.spellId then
-					MultiShot.first_hit_time = nil
-				elseif spellId == Butchery.spellId then
-					Butchery.first_hit_time = nil
-				elseif spellId == Carve.spellId then
-					Carve.first_hit_time = nil
-				end
-			elseif eventType == 'SPELL_DAMAGE' then
-				if spellId == MultiShot.spellId then
-					MultiShot:recordTargetsHit()
-				elseif spellId == Butchery.spellId then
-					Butchery:recordTargetsHit()
-				elseif spellId == Carve.spellId then
-					Carve:recordTargetsHit()
-				end
+			if spellId == ArcaneShot.spellId then
+				Shrapnel_SetTargetMode(1)
+			elseif spellId == MultiShot.spellId then
+				MultiShot.first_hit_time = nil
+			elseif spellId == Butchery.spellId then
+				Butchery.first_hit_time = nil
+			elseif spellId == Carve.spellId then
+				Carve.first_hit_time = nil
+			end
+		end
+		return
+	end
+	if eventType == 'SPELL_MISSED' then
+		if Shrapnel.previous and shrapnelPanel:IsVisible() and Shrapnel.miss_effect and var.last_ability and spellId == var.last_ability.spellId then
+			shrapnelPreviousPanel.border:SetTexture('Interface\\AddOns\\Shrapnel\\misseffect.blp')
+		end
+		return
+	end
+	if eventType == 'SPELL_DAMAGE' then
+		if Shrapnel.auto_aoe then
+			if spellId == MultiShot.spellId then
+				MultiShot:recordTargetsHit()
+			elseif spellId == Butchery.spellId then
+				Butchery:recordTargetsHit()
+			elseif spellId == Carve.spellId then
+				Carve:recordTargetsHit()
 			end
 		end
 	end
 end
 
-function events:PLAYER_TARGET_CHANGED()
+local function UpdateTargetInfo()
 	if ShouldHide() then
-		return
+		Disappear()
+		return false
 	end
-	if ElvUI and #glows == 0 then
-		CreateOverlayGlows()
-	end
-	local previouslyHostile = Target.hostile
-	Target.hostile = UnitCanAttack('player', 'target')
-	if Target.hostile then
-		Target.guid = UnitGUID('target')
-		Target.level = UnitLevel('target')
-		Target.boss = Target.level == -1 or (Target.level >= UnitLevel('player') + 2 and not UnitInRaid('player'))
-		for i = 1, #Target.healthArray do
-			Target.healthArray[i] = UnitHealth('target')
-		end
-		UpdateCombat()
-		shrapnelPanel:Show()
-	elseif Shrapnel.always_on then
-		Target.guid = 0
+	local guid = UnitGUID('target')
+	if not guid then
+		Target.guid = nil
 		Target.boss = false
 		Target.hostile = true
 		for i = 1, #Target.healthArray do
 			Target.healthArray[i] = 0
 		end
+		if Shrapnel.always_on then
+			UpdateCombat()
+			shrapnelPanel:Show()
+			return true
+		end
+		Disappear()
+		return
+	end
+	if guid ~= Target.guid then
+		Target.guid = UnitGUID('target')
+		for i = 1, #Target.healthArray do
+			Target.healthArray[i] = UnitHealth('target')
+		end
+	end
+	Target.level = UnitLevel('target')
+	Target.boss = Target.level == -1 or (Target.level >= UnitLevel('player') + 2 and not UnitInRaid('player'))
+	Target.hostile = UnitCanAttack('player', 'target') and not UnitIsDead('target')
+	if Target.hostile or Shrapnel.always_on then
 		UpdateCombat()
 		shrapnelPanel:Show()
-	elseif previouslyHostile then
-		Disappear()
+		return true
+	end
+	Disappear()
+end
+
+function events:PLAYER_TARGET_CHANGED()
+	UpdateTargetInfo()
+end
+
+function events:UNIT_FACTION(unitID)
+	if unitID == 'target' then
+		UpdateTargetInfo()
+	end
+end
+
+function events:UNIT_FLAGS(unitID)
+	if unitID == 'target' then
+		UpdateTargetInfo()
 	end
 end
 
 function events:PLAYER_REGEN_DISABLED()
 	combatStartTime = GetTime()
-	MM_Var.TrueshotCooldown = 0
 end
 
 function events:PLAYER_REGEN_ENABLED()
@@ -1287,15 +1436,9 @@ function events:PLAYER_REGEN_ENABLED()
 	end
 end
 
-function events:UNIT_FACTION(unitID)
-	if unitID == 'target' then
-		events:PLAYER_TARGET_CHANGED()
-	end
-end
-
 function events:PLAYER_EQUIPMENT_CHANGED()
-	T19P = EquippedTier('Eagletalon')
-	FrizzosFingertrap = Equipped("Frizzo's Fingertrap", 11) or Equipped("Frizzo's Fingertrap", 12)
+	Tier.T19P = EquippedTier('Eagletalon ')
+	ItemEquipped.FrizzosFingertrap = Equipped("Frizzo's Fingertrap")
 end
 
 function events:PLAYER_SPECIALIZATION_CHANGED(unitName)
@@ -1304,19 +1447,19 @@ function events:PLAYER_SPECIALIZATION_CHANGED(unitName)
 			abilities[i].name, _, abilities[i].icon = GetSpellInfo(abilities[i].spellId)
 			abilities[i].known = IsPlayerSpell(abilities[i].spellId)
 		end
-		T19Survival4P.known = T19P >= 4
+		T19Survival4P.known = Tier.T19P >= 4
 		currentSpec = GetSpecialization() or 0
-		if ShouldHide() then
-			Disappear()
-		end
 		Shrapnel_SetTargetMode(1)
-		events:PLAYER_TARGET_CHANGED()
+		UpdateTargetInfo()
 	end
 end
 
 function events:PLAYER_ENTERING_WORLD()
 	events:PLAYER_EQUIPMENT_CHANGED()
 	events:PLAYER_SPECIALIZATION_CHANGED('player')
+	if #glows == 0 then
+		CreateOverlayGlows()
+	end
 end
 
 shrapnelPanel.button:SetScript('OnClick', function(self, button, down)
@@ -1335,9 +1478,9 @@ shrapnelPanel:SetScript('OnUpdate', function(self, elapsed)
 	abilityTimer = abilityTimer + elapsed
 	if abilityTimer >= Shrapnel.frequency then
 		if Shrapnel.auto_aoe then
-			if currentSpec == SPEC_MARKSMANSHIP then
+			if currentSpec == SPEC.MARKSMANSHIP then
 				MultiShot:updateTargetsHit()
-			elseif currentSpec == SPEC_SURVIVAL then
+			elseif currentSpec == SPEC.SURVIVAL then
 				Butchery:updateTargetsHit()
 				Carve:updateTargetsHit()
 			end
@@ -1353,201 +1496,242 @@ end
 
 function SlashCmdList.Shrapnel(msg, editbox)
 	msg = { strsplit(' ', strlower(msg)) }
-	if msg[1] == 'locked' then
+	if startsWith(msg[1], 'lock') then
 		if msg[2] then
 			Shrapnel.locked = msg[2] == 'on'
 			UpdateDraggable()
 		end
-		print('Shrapnel - Locked: ' .. (Shrapnel.locked and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'snap' then
+		return print('Shrapnel - Locked: ' .. (Shrapnel.locked and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if startsWith(msg[1], 'snap') then
 		if msg[2] then
-			Shrapnel.snap = msg[2] == 'on'
+			if msg[2] == 'above' or msg[2] == 'over' then
+				Shrapnel.snap = 'above'
+			elseif msg[2] == 'below' or msg[2] == 'under' then
+				Shrapnel.snap = 'below'
+			else
+				Shrapnel.snap = false
+				shrapnelPanel:ClearAllPoints()
+			end
+			OnResourceFrameShow()
 		end
-		print('Shrapnel - Snap to Blizzard combat resources frame: ' .. (Shrapnel.snap and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'scale' then
-		if msg[2] == 'prev' then
+		return print('Shrapnel - Snap to Blizzard combat resources frame: ' .. (Shrapnel.snap and ('|cFF00C000' .. Shrapnel.snap) or '|cFFC00000Off'))
+	end
+	if msg[1] == 'scale' then
+		if startsWith(msg[2], 'prev') then
 			if msg[3] then
-				Shrapnel.scale_previous = tonumber(msg[3]) or 0.7
-				shrapnelPreviousPanel:SetScale(Shrapnel.scale_previous)
+				Shrapnel.scale.previous = tonumber(msg[3]) or 0.7
+				shrapnelPreviousPanel:SetScale(Shrapnel.scale.previous)
 			end
-			print('Shrapnel - Previous ability icon scale set to: |cFFFFD000' .. Shrapnel.scale_previous .. '|r times')
-		elseif msg[2] == 'main' then
+			return print('Shrapnel - Previous ability icon scale set to: |cFFFFD000' .. Shrapnel.scale.previous .. '|r times')
+		end
+		if msg[2] == 'main' then
 			if msg[3] then
-				Shrapnel.scale_main = tonumber(msg[3]) or 1
-				shrapnelPanel:SetScale(Shrapnel.scale_main)
+				Shrapnel.scale.main = tonumber(msg[3]) or 1
+				shrapnelPanel:SetScale(Shrapnel.scale.main)
 			end
-			print('Shrapnel - Main ability icon scale set to: |cFFFFD000' .. Shrapnel.scale_main .. '|r times')
-		elseif msg[2] == 'cd' then
+			return print('Shrapnel - Main ability icon scale set to: |cFFFFD000' .. Shrapnel.scale.main .. '|r times')
+		end
+		if msg[2] == 'cd' then
 			if msg[3] then
-				Shrapnel.scale_cooldown = tonumber(msg[3]) or 0.7
-				shrapnelCooldownPanel:SetScale(Shrapnel.scale_cooldown)
+				Shrapnel.scale.cooldown = tonumber(msg[3]) or 0.7
+				shrapnelCooldownPanel:SetScale(Shrapnel.scale.cooldown)
 			end
-			print('Shrapnel - Cooldown ability icon scale set to: |cFFFFD000' .. Shrapnel.scale_cooldown .. '|r times')
-		elseif msg[2] == 'trap' then
+			return print('Shrapnel - Cooldown ability icon scale set to: |cFFFFD000' .. Shrapnel.scale.cooldown .. '|r times')
+		end
+		if startsWith(msg[2], 'int') then
 			if msg[3] then
-				Shrapnel.scale_trap = tonumber(msg[3]) or 0.4
-				shrapnelTrapPanel:SetScale(Shrapnel.scale_trap)
+				Shrapnel.scale.interrupt = tonumber(msg[3]) or 0.4
+				shrapnelInterruptPanel:SetScale(Shrapnel.scale.interrupt)
 			end
-			print('Shrapnel - Trap ability icon scale set to: |cFFFFD000' .. Shrapnel.scale_trap .. '|r times')
-		elseif msg[2] == 'interrupt' then
+			return print('Shrapnel - Interrupt ability icon scale set to: |cFFFFD000' .. Shrapnel.scale.interrupt .. '|r times')
+		end
+		if startsWith(msg[2], 'trap') then
 			if msg[3] then
-				Shrapnel.scale_interrupt = tonumber(msg[3]) or 0.4
-				shrapnelInterruptPanel:SetScale(Shrapnel.scale_interrupt)
+				Shrapnel.scale.trap = tonumber(msg[3]) or 0.4
+				shrapnelInterruptPanel:SetScale(Shrapnel.scale.trap)
 			end
-			print('Shrapnel - Interrupt ability icon scale set to: |cFFFFD000' .. Shrapnel.scale_interrupt .. '|r times')
-		elseif msg[2] == 'glow' then
+			return print('Shrapnel - Trap ability icon scale set to: |cFFFFD000' .. Shrapnel.scale.trap .. '|r times')
+		end
+		if msg[2] == 'glow' then
 			if msg[3] then
-				Shrapnel.scale_glow = tonumber(msg[3]) or 1
+				Shrapnel.scale.glow = tonumber(msg[3]) or 1
 				UpdateGlowColorAndScale()
 			end
-			print('Shrapnel - Action button glow scale set to: |cFFFFD000' .. Shrapnel.scale_glow .. '|r times')
-		else
-			print('Shrapnel - Default icon scale options are |cFFFFD000prev 0.7|r, |cFFFFD000main 1|r, |cFFFFD000cd 0.7|r, |cFFFFD000trap 0.7|r, |cFFFFD000interrupt 0.4|r, and |cFFFFD000glow 1|r')
+			return print('Shrapnel - Action button glow scale set to: |cFFFFD000' .. Shrapnel.scale.glow .. '|r times')
 		end
-	elseif msg[1] == 'alpha' then
+		return print('Shrapnel - Default icon scale options: |cFFFFD000prev 0.7|r, |cFFFFD000main 1|r, |cFFFFD000cd 0.7|r, |cFFFFD000interrupt 0.4|r, and |cFFFFD000glow 1|r')
+	end
+	if msg[1] == 'alpha' then
 		if msg[2] then
 			Shrapnel.alpha = max(min((tonumber(msg[2]) or 100), 100), 0) / 100
 			UpdateAlpha()
 		end
-		print('Shrapnel - Icon transparency set to: |cFFFFD000' .. Shrapnel.alpha * 100 .. '%|r')
-	elseif msg[1] == 'frequency' then
+		return print('Shrapnel - Icon transparency set to: |cFFFFD000' .. Shrapnel.alpha * 100 .. '%|r')
+	end
+	if startsWith(msg[1], 'freq') then
 		if msg[2] then
 			Shrapnel.frequency = tonumber(msg[2]) or 0.05
 			UpdateHealthArray()
 		end
-		print('Shrapnel - Calculation frequency: Every |cFFFFD000' .. Shrapnel.frequency .. '|r seconds')
-	elseif msg[1] == 'glow' then
+		return print('Shrapnel - Calculation frequency: Every |cFFFFD000' .. Shrapnel.frequency .. '|r seconds')
+	end
+	if startsWith(msg[1], 'glow') then
 		if msg[2] == 'main' then
 			if msg[3] then
-				Shrapnel.glow_main = msg[3] == 'on'
+				Shrapnel.glow.main = msg[3] == 'on'
+				UpdateGlows()
 			end
-			print('Shrapnel - Glowing ability buttons (main icon): ' .. (Shrapnel.glow_main and '|cFF00C000On' or '|cFFC00000Off'))
-		elseif msg[2] == 'cd' then
+			return print('Shrapnel - Glowing ability buttons (main icon): ' .. (Shrapnel.glow.main and '|cFF00C000On' or '|cFFC00000Off'))
+		end
+		if msg[2] == 'cd' then
 			if msg[3] then
-				Shrapnel.glow_cooldown = msg[3] == 'on'
+				Shrapnel.glow.cooldown = msg[3] == 'on'
+				UpdateGlows()
 			end
-			print('Shrapnel - Glowing ability buttons (cooldown icon): ' .. (Shrapnel.glow_cooldown and '|cFF00C000On' or '|cFFC00000Off'))
-		elseif msg[2] == 'trap' then
+			return print('Shrapnel - Glowing ability buttons (cooldown icon): ' .. (Shrapnel.glow.cooldown and '|cFF00C000On' or '|cFFC00000Off'))
+		end
+		if startsWith(msg[2], 'int') then
 			if msg[3] then
-				Shrapnel.glow_trap = msg[3] == 'on'
+				Shrapnel.glow.interrupt = msg[3] == 'on'
+				UpdateGlows()
 			end
-			print('Shrapnel - Glowing ability buttons (trap icon): ' .. (Shrapnel.glow_trap and '|cFF00C000On' or '|cFFC00000Off'))
-		elseif msg[2] == 'interrupt' then
+			return print('Shrapnel - Glowing ability buttons (interrupt icon): ' .. (Shrapnel.glow.interrupt and '|cFF00C000On' or '|cFFC00000Off'))
+		end
+		if startsWith(msg[2], 'trap') then
 			if msg[3] then
-				Shrapnel.glow_interrupt = msg[3] == 'on'
+				Shrapnel.glow.trap = msg[3] == 'on'
+				UpdateGlows()
 			end
-			print('Shrapnel - Glowing ability buttons (interrupt icon): ' .. (Shrapnel.glow_interrupt and '|cFF00C000On' or '|cFFC00000Off'))
-		elseif msg[2] == 'blizzard' then
+			return print('Shrapnel - Glowing ability buttons (trap icon): ' .. (Shrapnel.glow.trap and '|cFF00C000On' or '|cFFC00000Off'))
+		end
+		if startsWith(msg[2], 'bliz') then
 			if msg[3] then
-				Shrapnel.glow_blizzard = msg[3] == 'on'
+				Shrapnel.glow.blizzard = msg[3] == 'on'
+				UpdateGlows()
 			end
-			print('Shrapnel - Blizzard default proc glow: ' .. (Shrapnel.glow_blizzard and '|cFF00C000On' or '|cFFC00000Off'))
-		elseif msg[2] == 'color' then
+			return print('Shrapnel - Blizzard default proc glow: ' .. (Shrapnel.glow.blizzard and '|cFF00C000On' or '|cFFC00000Off'))
+		end
+		if msg[2] == 'color' then
 			if msg[5] then
-				Shrapnel.glow_color.r = max(min(tonumber(msg[3]) or 0, 1), 0)
-				Shrapnel.glow_color.g = max(min(tonumber(msg[4]) or 0, 1), 0)
-				Shrapnel.glow_color.b = max(min(tonumber(msg[5]) or 0, 1), 0)
+				Shrapnel.glow.color.r = max(min(tonumber(msg[3]) or 0, 1), 0)
+				Shrapnel.glow.color.g = max(min(tonumber(msg[4]) or 0, 1), 0)
+				Shrapnel.glow.color.b = max(min(tonumber(msg[5]) or 0, 1), 0)
 				UpdateGlowColorAndScale()
 			end
-			print('Shrapnel - Glow color:', '|cFFFF0000' .. Shrapnel.glow_color.r, '|cFF00FF00' .. Shrapnel.glow_color.g, '|cFF0000FF' .. Shrapnel.glow_color.b)
-		else
-			print('Shrapnel - Possible glow options are: |cFFFFD000main|r, |cFFFFD000cd|r, |cFFFFD000trap|r, |cFFFFD000interrupt|r, |cFFFFD000blizzard|r, and |cFFFFD000color')
+			return print('Shrapnel - Glow color:', '|cFFFF0000' .. Shrapnel.glow.color.r, '|cFF00FF00' .. Shrapnel.glow.color.g, '|cFF0000FF' .. Shrapnel.glow.color.b)
 		end
-		UpdateGlows()
-	elseif msg[1] == 'previous' then
+		return print('Shrapnel - Possible glow options: |cFFFFD000main|r, |cFFFFD000cd|r, |cFFFFD000interrupt|r, |cFFFFD000blizzard|r, and |cFFFFD000color')
+	end
+	if startsWith(msg[1], 'prev') then
 		if msg[2] then
 			Shrapnel.previous = msg[2] == 'on'
-			events:PLAYER_TARGET_CHANGED()
+			UpdateTargetInfo()
 		end
-		print('Shrapnel - Previous ability icon: ' .. (Shrapnel.previous and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'always' then
+		return print('Shrapnel - Previous ability icon: ' .. (Shrapnel.previous and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if msg[1] == 'always' then
 		if msg[2] then
 			Shrapnel.always_on = msg[2] == 'on'
-			events:PLAYER_TARGET_CHANGED()
+			UpdateTargetInfo()
 		end
-		print('Shrapnel - Show the Shrapnel UI without a target: ' .. (Shrapnel.always_on and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'cd' then
+		return print('Shrapnel - Show the Shrapnel UI without a target: ' .. (Shrapnel.always_on and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if msg[1] == 'cd' then
 		if msg[2] then
 			Shrapnel.cooldown = msg[2] == 'on'
 		end
-		print('Shrapnel - Use Shrapnel for cooldown management: ' .. (Shrapnel.cooldown and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'gcd' then
+		return print('Shrapnel - Use Shrapnel for cooldown management: ' .. (Shrapnel.cooldown and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if msg[1] == 'gcd' then
 		if msg[2] then
 			Shrapnel.gcd = msg[2] == 'on'
 			if not Shrapnel.gcd then
 				shrapnelPanel.gcd:Hide()
 			end
 		end
-		print('Shrapnel - Global cooldown swipe: ' .. (Shrapnel.gcd and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'dim' then
+		return print('Shrapnel - Global cooldown swipe: ' .. (Shrapnel.gcd and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if startsWith(msg[1], 'dim') then
 		if msg[2] then
 			Shrapnel.dimmer = msg[2] == 'on'
 			if not Shrapnel.dimmer then
 				shrapnelPanel.dimmer:Hide()
 			end
 		end
-		print('Shrapnel - Dim main ability icon when you don\'t have enough focus to use it: ' .. (Shrapnel.dimmer and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'miss' then
+		return print('Shrapnel - Dim main ability icon when you don\'t have enough focus to use it: ' .. (Shrapnel.dimmer and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if msg[1] == 'miss' then
 		if msg[2] then
 			Shrapnel.miss_effect = msg[2] == 'on'
 		end
-		print('Shrapnel - Red border around previous ability when it fails to hit: ' .. (Shrapnel.miss_effect and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'aoe' then
+		return print('Shrapnel - Red border around previous ability when it fails to hit: ' .. (Shrapnel.miss_effect and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if msg[1] == 'aoe' then
 		if msg[2] then
 			Shrapnel.aoe = msg[2] == 'on'
 			Shrapnel_SetTargetMode(1)
 			UpdateDraggable()
 		end
-		print('Shrapnel - Allow clicking main ability icon to toggle amount of targets (disables moving): ' .. (Shrapnel.aoe and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'bossonly' then
+		return print('Shrapnel - Allow clicking main ability icon to toggle amount of targets (disables moving): ' .. (Shrapnel.aoe and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if msg[1] == 'bossonly' then
 		if msg[2] then
 			Shrapnel.boss_only = msg[2] == 'on'
 		end
-		print('Shrapnel - Only use cooldowns on bosses: ' .. (Shrapnel.boss_only and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'hidespec' then
+		return print('Shrapnel - Only use cooldowns on bosses: ' .. (Shrapnel.boss_only and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if msg[1] == 'hidespec' or startsWith(msg[1], 'spec') then
 		if msg[2] then
-			if msg[2] == "bm" then
-				Shrapnel.hide_bm = not Shrapnel.hide_bm
+			if startsWith(msg[2], 'b') then
+				Shrapnel.hide.bm = not Shrapnel.hide.bm
 				events:PLAYER_SPECIALIZATION_CHANGED('player')
-				print('Shrapnel - Beast Mastery specialization: |cFFFFD000' .. (Shrapnel.hide_bm and '|cFFC00000Off' or '|cFF00C000On'))
+				return print('Shrapnel - Beast Mastery specialization: |cFFFFD000' .. (Shrapnel.hide.bm and '|cFFC00000Off' or '|cFF00C000On'))
 			end
-			if msg[2] == "mm" then
-				Shrapnel.hide_mm = not Shrapnel.hide_mm
+			if startsWith(msg[2], 'm') then
+				Shrapnel.hide.mm = not Shrapnel.hide.mm
 				events:PLAYER_SPECIALIZATION_CHANGED('player')
-				print('Shrapnel - Marksmanship specialization: |cFFFFD000' .. (Shrapnel.hide_mm and '|cFFC00000Off' or '|cFF00C000On'))
+				return print('Shrapnel - Marksmanship specialization: |cFFFFD000' .. (Shrapnel.hide.mm and '|cFFC00000Off' or '|cFF00C000On'))
 			end
-			if msg[2] == "sv" then
-				Shrapnel.hide_sv = not Shrapnel.hide_sv
+			if startsWith(msg[2], 's') then
+				Shrapnel.hide.sv = not Shrapnel.hide.sv
 				events:PLAYER_SPECIALIZATION_CHANGED('player')
-				print('Shrapnel - Survival specialization: |cFFFFD000' .. (Shrapnel.hide_sv and '|cFFC00000Off' or '|cFF00C000On'))
+				return print('Shrapnel - Survival specialization: |cFFFFD000' .. (Shrapnel.hide.sv and '|cFFC00000Off' or '|cFF00C000On'))
 			end
 		end
-	elseif msg[1] == 'interrupt' then
+		return print('Shrapnel - Possible hidespec options: |cFFFFD000aff|r/|cFFFFD000demo|r/|cFFFFD000dest|r - toggle disabling Shrapnel for specializations')
+	end
+	if startsWith(msg[1], 'int') then
 		if msg[2] then
 			Shrapnel.interrupt = msg[2] == 'on'
 		end
-		print('Shrapnel - Show an icon for interruptable spells: ' .. (Shrapnel.interrupt and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'trap' then
+		return print('Shrapnel - Show an icon for interruptable spells: ' .. (Shrapnel.interrupt and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if startsWith(msg[1], 'trap') then
 		if msg[2] then
 			Shrapnel.trap = msg[2] == 'on'
 		end
-		print('Shrapnel - Show an icon for trap spells (survival): ' .. (Shrapnel.trap and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'st90' then
+		return print('Shrapnel - Show an icon for traps (Survival): ' .. (Shrapnel.trap and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if msg[1] == 'st90' then
 		if msg[2] then
 			Shrapnel.single_90 = msg[2] == 'on'
 		end
-		print('Shrapnel - Include Barrage in single target: ' .. (Shrapnel.single_90 and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'auto' then
+		return print('Shrapnel - Use level 90 talents in single target mode: ' .. (Shrapnel.single_90 and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if msg[1] == 'auto' then
 		if msg[2] then
 			Shrapnel.auto_aoe = msg[2] == 'on'
 		end
-		print('Shrapnel - Automatically change target mode on Arcane Shot/Multi-Shot: ' .. (Shrapnel.auto_aoe and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'pot' then
+		return print('Shrapnel - Automatically change target mode on AoE spells: ' .. (Shrapnel.auto_aoe and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if startsWith(msg[1], 'pot') then
 		if msg[2] then
 			Shrapnel.pot = msg[2] == 'on'
 		end
-		print('Shrapnel - Show Prolonged Power potions in cooldown UI: ' .. (Shrapnel.pot and '|cFF00C000On' or '|cFFC00000Off'))
-	elseif msg[1] == 'reset' then
+		return print('Shrapnel - Show Prolonged Power potions in cooldown UI: ' .. (Shrapnel.pot and '|cFF00C000On' or '|cFFC00000Off'))
+	end
+	if msg[1] == 'reset' then
 		shrapnelPanel:ClearAllPoints()
 		shrapnelPanel:SetPoint('CENTER', 0, -169)
 		shrapnelPreviousPanel:ClearAllPoints()
@@ -1556,33 +1740,37 @@ function SlashCmdList.Shrapnel(msg, editbox)
 		shrapnelCooldownPanel:SetPoint('BOTTOMLEFT', shrapnelPanel, 'BOTTOMRIGHT', 10, -5)
 		shrapnelInterruptPanel:ClearAllPoints()
 		shrapnelInterruptPanel:SetPoint('TOPLEFT', shrapnelPanel, 'TOPRIGHT', 16, 25)
-		print('Shrapnel - Position has been reset to default')
-	else
-		print('Shrapnel (version: |cFFFFD000' .. GetAddOnMetadata('Shrapnel', 'Version') .. '|r) - Commands:')
-		print('  /shrapnel locked |cFF00C000on|r/|cFFC00000off|r - lock the Shrapnel UI so that it can\'t be moved')
-		print('  /shrapnel snap |cFF00C000on|r/|cFFC00000off|r - snap the Shrapnel UI to the Blizzard combat resources frame')
-		print('  /shrapnel scale |cFFFFD000prev|r/|cFFFFD000main|r/|cFFFFD000cd|r/|cFFFFD000interrupt|r - adjust the scale of the Shrapnel UI icons')
-		print('  /shrapnel alpha |cFFFFD000[percent]|r - adjust the transparency of the Shrapnel UI icons')
-		print('  /shrapnel frequency |cFFFFD000[number]|r - set the calculation frequency (default is every 0.05 seconds)')
-		print('  /shrapnel glow |cFFFFD000main|r/|cFFFFD000cd|r/|cFFFFD000interrupt|r/|cFFFFD000blizzard|r |cFF00C000on|r/|cFFC00000off|r - glowing ability buttons on action bars')
-		print('  /shrapnel glow color |cFFF000000.0-1.0|r |cFF00FF000.1-1.0|r |cFF0000FF0.0-1.0|r - adjust the color of the ability button glow')
-		print('  /shrapnel previous |cFF00C000on|r/|cFFC00000off|r - previous ability icon')
-		print('  /shrapnel always |cFF00C000on|r/|cFFC00000off|r - show the Shrapnel UI without a target')
-		print('  /shrapnel cd |cFF00C000on|r/|cFFC00000off|r - use Shrapnel for cooldown management')
-		print('  /shrapnel gcd |cFF00C000on|r/|cFFC00000off|r - show global cooldown swipe on main ability icon')
-		print('  /shrapnel dim |cFF00C000on|r/|cFFC00000off|r - dim main ability icon when you don\'t have enough focus to use it')
-		print('  /shrapnel miss |cFF00C000on|r/|cFFC00000off|r - red border around previous ability when it fails to hit')
-		print('  /shrapnel aoe |cFF00C000on|r/|cFFC00000off|r - allow clicking main ability icon to toggle amount of targets (disables moving)')
-		print('  /shrapnel bossonly |cFF00C000on|r/|cFFC00000off|r - only use cooldowns on bosses')
-		print('  /shrapnel hidespec |cFFFFD000bm|r/|cFFFFD000mm|r/|cFFFFD000sv|r - toggle disabling Shrapnel for specializations')
-		print('  /shrapnel interrupt |cFF00C000on|r/|cFFC00000off|r - show an icon for interruptable spells')
-		print('  /shrapnel trap |cFF00C000on|r/|cFFC00000off|r - show an icon for trap spells (survival)')
-		print('  /shrapnel st90 |cFF00C000on|r/|cFFC00000off|r - include Barrage in single target')
-		print('  /shrapnel auto |cFF00C000on|r/|cFFC00000off|r  - automatically change target mode on Arcane Shot/Multi-Shot')
-		print('  /shrapnel pot |cFF00C000on|r/|cFFC00000off|r - show Prolonged Power potions in cooldown UI')
-		print('  /shrapnel |cFFFFD000reset|r - reset the location of the Shrapnel UI to default')
-		if Basic_Resources then
-			print('For Basic Resources commands, please type |cFFFFD000/bres')
-		end
+		shrapnelTrapPanel:ClearAllPoints()
+		shrapnelTrapPanel:SetPoint('TOPRIGHT', shrapnelPanel, 'TOPLEFT', -16, 25)
+		return print('Shrapnel - Position has been reset to default')
 	end
+	print('Shrapnel (version: |cFFFFD000' .. GetAddOnMetadata('Shrapnel', 'Version') .. '|r) - Commands:')
+	local _, cmd
+	for _, cmd in next, {
+		'locked |cFF00C000on|r/|cFFC00000off|r - lock the Shrapnel UI so that it can\'t be moved',
+		'snap |cFF00C000above|r/|cFF00C000below|r/|cFFC00000off|r - snap the Shrapnel UI to the Blizzard combat resources frame',
+		'scale |cFFFFD000prev|r/|cFFFFD000main|r/|cFFFFD000cd|r/|cFFFFD000interrupt|r/|cFFFFD000trap|r/|cFFFFD000glow|r - adjust the scale of the Shrapnel UI icons',
+		'alpha |cFFFFD000[percent]|r - adjust the transparency of the Shrapnel UI icons',
+		'frequency |cFFFFD000[number]|r - set the calculation frequency (default is every 0.05 seconds)',
+		'glow |cFFFFD000main|r/|cFFFFD000cd|r/|cFFFFD000interrupt|r/|cFFFFD000trap|r/|cFFFFD000blizzard|r |cFF00C000on|r/|cFFC00000off|r - glowing ability buttons on action bars',
+		'glow color |cFFF000000.0-1.0|r |cFF00FF000.1-1.0|r |cFF0000FF0.0-1.0|r - adjust the color of the ability button glow',
+		'previous |cFF00C000on|r/|cFFC00000off|r - previous ability icon',
+		'always |cFF00C000on|r/|cFFC00000off|r - show the Shrapnel UI without a target',
+		'cd |cFF00C000on|r/|cFFC00000off|r - use Shrapnel for cooldown management',
+		'gcd |cFF00C000on|r/|cFFC00000off|r - show global cooldown swipe on main ability icon',
+		'dim |cFF00C000on|r/|cFFC00000off|r - dim main ability icon when you don\'t have enough focus to use it',
+		'miss |cFF00C000on|r/|cFFC00000off|r - red border around previous ability when it fails to hit',
+		'aoe |cFF00C000on|r/|cFFC00000off|r - allow clicking main ability icon to toggle amount of targets (disables moving)',
+		'bossonly |cFF00C000on|r/|cFFC00000off|r - only use cooldowns on bosses',
+		'hidespec |cFFFFD000aff|r/|cFFFFD000demo|r/|cFFFFD000dest|r - toggle disabling Shrapnel for specializations',
+		'interrupt |cFF00C000on|r/|cFFC00000off|r - show an icon for interruptable spells',
+		'trap |cFF00C000on|r/|cFFC00000off|r - show an icon for traps (survival)',
+		'st90 |cFF00C000on|r/|cFFC00000off|r - use level 90 talents in single target mode',
+		'auto |cFF00C000on|r/|cFFC00000off|r  - automatically change target mode on AoE spells',
+		'pot |cFF00C000on|r/|cFFC00000off|r - show Prolonged Power potions in cooldown UI',
+		'|cFFFFD000reset|r - reset the location of the Shrapnel UI to default',
+	} do
+		print('  ' .. SLASH_Shrapnel1 .. ' ' .. cmd)
+	end
+	print('Got ideas for improvement or found a bug? Contact |cFFABD473Firearm|cFFFFD000-Mal\'Ganis|r or |cFFFFD000Spy#1955|r (the author of this addon)')
 end
