@@ -19,6 +19,7 @@ BINDING_HEADER_SHRAPNEL = 'Shrapnel'
 
 local function InitializeVariables()
 	local function SetDefaults(t, ref)
+		local k, v
 		for k, v in next, ref do
 			if t[k] == nil then
 				local pchar
@@ -88,6 +89,8 @@ local SPEC = {
 local events, glows = {}, {}
 
 local me, abilityTimer, currentSpec, targetMode, combatStartTime = 0, 0, 0, 0, 0
+
+local Targets = {}
 
 -- tier set equipped pieces count
 local Tier = {
@@ -219,7 +222,7 @@ shrapnelTrapPanel.border:SetTexture('Interface\\AddOns\\Shrapnel\\border.blp')
 shrapnelTrapPanel.cast = CreateFrame('Cooldown', nil, shrapnelTrapPanel, 'CooldownFrameTemplate')
 shrapnelTrapPanel.cast:SetAllPoints(shrapnelTrapPanel)
 
-local Ability, abilities, abilityBySpellId = {}, {}, {}
+local Ability, abilities, abilityBySpellId, abilitiesAutoAoe = {}, {}, {}, {}
 Ability.__index = Ability
 
 function Ability.add(spellId, buff, player, spellId2)
@@ -268,7 +271,7 @@ function Ability:remains()
 	if self.buff_duration > 0 and self:casting() then
 		return self:duration()
 	end
-	local _, id, expires
+	local _, i, id, expires
 	for i = 1, 40 do
 		_, _, _, _, _, _, expires, _, _, _, id = UnitAura(self.auraTarget, i, self.auraFilter)
 		if not id then
@@ -292,7 +295,7 @@ function Ability:up(excludeCasting)
 	if not excludeCasting and self.buff_duration > 0 and self:casting() then
 		return true
 	end
-	local _, id, expires
+	local _, i, id, expires
 	for i = 1, 40 do
 		_, _, _, _, _, _, expires, _, _, _, id = UnitAura(self.auraTarget, i, self.auraFilter)
 		if not id then
@@ -317,7 +320,7 @@ function Ability:cooldown()
 end
 
 function Ability:stack()
-	local _, id, expires, count
+	local _, i, id, expires, count
 	for i = 1, 40 do
 		_, _, _, count, _, _, expires, _, _, _, id = UnitAura(self.auraTarget, i, self.auraFilter)
 		if not id then
@@ -370,31 +373,73 @@ function Ability:previous()
 	return var.last_gcd == self or var.last_ability == self
 end
 
-function Ability:recordTargetsHit()
-	if not self.first_hit_time then
-		self.first_hit_time = var.time
-		self.target_hit_count = 0
+function Ability:setAutoAoe(enabled)
+	if enabled and not self.auto_aoe then
+		self.auto_aoe = true
+		self.first_hit_time = nil
+		self.targets_hit = {}
+		abilitiesAutoAoe[#abilitiesAutoAoe + 1] = self
 	end
-	self.target_hit_count = self.target_hit_count + 1
-	for i = 1, #targetModes[currentSpec] do
-		if self.target_hit_count >= targetModes[currentSpec][i][1] and targetModes[currentSpec][i][1] > targetModes[currentSpec][targetMode][1] then
-			Shrapnel_SetTargetMode(i)
+	if not enabled and self.auto_aoe then
+		self.auto_aoe = nil
+		self.first_hit_time = nil
+		self.targets_hit = nil
+		local i
+		for i = 1, #abilitiesAutoAoe do
+			if abilitiesAutoAoe[i] == self then
+				abilitiesAutoAoe[i] = nil
+				break
+			end
 		end
 	end
 end
 
+function Ability:recordTargetHit(guid)
+	local t = GetTime()
+	self.targets_hit[guid] = t
+	Targets[guid] = t
+	if not self.first_hit_time then
+		self.first_hit_time = t
+	end
+end
+
+local function AutoAoeUpdateTargetMode()
+	local count, i = 0
+	for i in next, Targets do
+		count = count + 1
+	end
+	if count <= 1 then
+		Shrapnel_SetTargetMode(1)
+		return
+	end
+	for i = #targetModes[currentSpec], 1, -1 do
+		if count >= targetModes[currentSpec][i][1] then
+			Shrapnel_SetTargetMode(i)
+			return
+		end
+	end
+end
+
+local function AutoAoeRemoveTarget(guid)
+	if Targets[guid] then
+		Targets[guid] = nil
+		AutoAoeUpdateTargetMode()
+	end
+end
+
 function Ability:updateTargetsHit()
-	if self.first_hit_time and var.time - self.first_hit_time >= 0.3 then
+	if self.first_hit_time and GetTime() - self.first_hit_time >= 0.3 then
 		self.first_hit_time = nil
-		local highestTargetMode = 1
-		for i = 1, #targetModes[currentSpec] do
-			if self.target_hit_count >= targetModes[currentSpec][i][1] and targetModes[currentSpec][i][1] > highestTargetMode then
-				highestTargetMode = i
+		local guid
+		for guid in next, Targets do
+			if not self.targets_hit[guid] then
+				Targets[guid] = nil
 			end
 		end
-		if highestTargetMode ~= targetMode then
-			Shrapnel_SetTargetMode(highestTargetMode)
+		for guid in next, self.targets_hit do
+			self.targets_hit[guid] = nil
 		end
+		AutoAoeUpdateTargetMode()
 	end
 end
 
@@ -413,6 +458,7 @@ local DireBeast = Ability.add(120679, false, true)
 local DireFrenzy = Ability.add(217200, false, true)
 local KillCommand = Ability.add(34026, false, true)
 local MultiShot = Ability.add(2643, false, true)
+MultiShot:setAutoAoe(true)
 local Stampede = Ability.add(201430, false, true)
 local TitansThunder = Ability.add(208068, 'pet', true)
 ---- MM + BM talents
@@ -459,9 +505,11 @@ AspectOfTheEagle.buff_duration = 10
 local Butchery = Ability.add(212436, false, true)
 Butchery.focus_cost = 40
 Butchery.requires_charge = true
+Butchery:setAutoAoe(true)
 local Caltrops = Ability.add(194277, false, true, 194279)
 Caltrops.buff_duration = 6
 local Carve = Ability.add(187708, false, true)
+Carve:setAutoAoe(true)
 local DragonsfireGrenade = Ability.add(194855, false, true, 194858)
 DragonsfireGrenade.buff_duration = 8
 local ExplosiveTrap = Ability.add(191433, false, true, 13812)
@@ -469,7 +517,8 @@ ExplosiveTrap.buff_duration = 10
 local FlankingStrike = Ability.add(202800, false, true)
 FlankingStrike.focus_cost = 50
 FlankingStrike.requires_pet = true
-local FuryOfTheEagle = Ability.add(203415, false, true)
+local FuryOfTheEagle = Ability.add(203415, false, true, 203413)
+FuryOfTheEagle:setAutoAoe(true)
 local Harpoon = Ability.add(190925, false, true, 190927)
 local OnTheTrail = Ability.add(204081, false, true)
 local Lacerate = Ability.add(185855, false, true)
@@ -516,6 +565,7 @@ local function GetAbilityCasting()
 	if not var.cast_name then
 		return
 	end
+	local i
 	for i = 1,#abilities do
 		if abilities[i].name == var.cast_name then
 			return abilities[i]
@@ -597,7 +647,7 @@ function ProlongedPower:cooldown()
 end
 
 local function BloodlustActive()
-	local _, id
+	local _, i, id
 	for i = 1, 40 do
 		_, _, _, _, _, _, _, _, _, _, id = UnitAura('player', i, 'HELPFUL')
 		if id == 2825 or id == 32182 or id == 80353 or id == 90355 or id == 160452 or id == 146555 then
@@ -1030,7 +1080,7 @@ end
 hooksecurefunc('ActionButton_ShowOverlayGlow', DenyOverlayGlow) -- Disable Blizzard's built-in action button glowing
 
 local function UpdateGlowColorAndScale()
-	local w, h, glow
+	local w, h, glow, i
 	local r = Shrapnel.glow.color.r
 	local g = Shrapnel.glow.color.g
 	local b = Shrapnel.glow.color.b
@@ -1050,6 +1100,7 @@ local function UpdateGlowColorAndScale()
 end
 
 local function CreateOverlayGlows()
+	local b, i
 	local GenerateGlow = function(button)
 		if button then
 			local glow = CreateFrame('Frame', nil, button, 'ActionBarButtonSpellActivationAlert')
@@ -1167,8 +1218,9 @@ function Equipped(name, slot)
 	if slot then
 		return SlotMatches(name, slot)
 	end
-	for slot = 1, 19 do
-		if SlotMatches(name, slot) then
+	local i
+	for i = 1, 19 do
+		if SlotMatches(name, i) then
 			return true
 		end
 	end
@@ -1177,7 +1229,7 @@ end
 
 function EquippedTier(name)
 	local slot = { 1, 3, 5, 7, 10, 15 }
-	local equipped = 0
+	local equipped, i = 0
 	for i = 1, #slot do
 		if Equipped(name, slot) then
 			equipped = equipped + 1
@@ -1244,6 +1296,7 @@ end
 
 local function UpdateHealthArray()
 	Target.healthArray = {}
+	local i
 	for i = 1, floor(3 / Shrapnel.frequency) do
 		Target.healthArray[i] = 0
 	end
@@ -1323,6 +1376,11 @@ function events:ADDON_LOADED(name)
 end
 
 function events:COMBAT_LOG_EVENT_UNFILTERED(self, eventType, hideCaster, srcGUID, srcName, srcFlags, srcRaidFlags, dstGUID, dstName, dstFlags, dstRaidFlags, spellId, spellName)
+	if eventType == 'UNIT_DIED' or eventType == 'SPELL_INSTAKILL' then
+		if Shrapnel.auto_aoe then
+			AutoAoeRemoveTarget(dstGUID)
+		end
+	end
 	if srcGUID ~= me then
 		return
 	end
@@ -1342,12 +1400,6 @@ function events:COMBAT_LOG_EVENT_UNFILTERED(self, eventType, hideCaster, srcGUID
 		if Shrapnel.auto_aoe then
 			if spellId == ArcaneShot.spellId then
 				Shrapnel_SetTargetMode(1)
-			elseif spellId == MultiShot.spellId then
-				MultiShot.first_hit_time = nil
-			elseif spellId == Butchery.spellId then
-				Butchery.first_hit_time = nil
-			elseif spellId == Carve.spellId then
-				Carve.first_hit_time = nil
 			end
 		end
 		return
@@ -1360,12 +1412,11 @@ function events:COMBAT_LOG_EVENT_UNFILTERED(self, eventType, hideCaster, srcGUID
 	end
 	if eventType == 'SPELL_DAMAGE' then
 		if Shrapnel.auto_aoe then
-			if spellId == MultiShot.spellId then
-				MultiShot:recordTargetsHit()
-			elseif spellId == Butchery.spellId then
-				Butchery:recordTargetsHit()
-			elseif spellId == Carve.spellId then
-				Carve:recordTargetsHit()
+			local i
+			for i = 1, #abilitiesAutoAoe do
+				if spellId == abilitiesAutoAoe[i].spellId or spellId == abilitiesAutoAoe[i].spellId2 then
+					abilitiesAutoAoe[i]:recordTargetHit(dstGUID)
+				end
 			end
 		end
 	end
@@ -1381,6 +1432,7 @@ local function UpdateTargetInfo()
 		Target.guid = nil
 		Target.boss = false
 		Target.hostile = true
+		local i
 		for i = 1, #Target.healthArray do
 			Target.healthArray[i] = 0
 		end
@@ -1394,6 +1446,7 @@ local function UpdateTargetInfo()
 	end
 	if guid ~= Target.guid then
 		Target.guid = UnitGUID('target')
+		local i
 		for i = 1, #Target.healthArray do
 			Target.healthArray[i] = UnitHealth('target')
 		end
@@ -1432,6 +1485,10 @@ end
 function events:PLAYER_REGEN_ENABLED()
 	combatStartTime = 0
 	if Shrapnel.auto_aoe then
+		local guid
+		for guid in next, Targets do
+			Targets[guid] = nil
+		end
 		Shrapnel_SetTargetMode(1)
 	end
 end
@@ -1443,6 +1500,7 @@ end
 
 function events:PLAYER_SPECIALIZATION_CHANGED(unitName)
 	if unitName == 'player' then
+		local i
 		for i = 1, #abilities do
 			abilities[i].name, _, abilities[i].icon = GetSpellInfo(abilities[i].spellId)
 			abilities[i].known = IsPlayerSpell(abilities[i].spellId)
@@ -1478,11 +1536,9 @@ shrapnelPanel:SetScript('OnUpdate', function(self, elapsed)
 	abilityTimer = abilityTimer + elapsed
 	if abilityTimer >= Shrapnel.frequency then
 		if Shrapnel.auto_aoe then
-			if currentSpec == SPEC.MARKSMANSHIP then
-				MultiShot:updateTargetsHit()
-			elseif currentSpec == SPEC.SURVIVAL then
-				Butchery:updateTargetsHit()
-				Carve:updateTargetsHit()
+			local i
+			for i = 1, #abilitiesAutoAoe do
+				abilitiesAutoAoe[i]:updateTargetsHit()
 			end
 		end
 		UpdateCombat()
@@ -1490,6 +1546,7 @@ shrapnelPanel:SetScript('OnUpdate', function(self, elapsed)
 end)
 
 shrapnelPanel:SetScript('OnEvent', function(self, event, ...) events[event](self, ...) end)
+local event
 for event in pairs(events) do
 	shrapnelPanel:RegisterEvent(event)
 end
