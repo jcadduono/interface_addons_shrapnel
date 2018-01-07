@@ -278,6 +278,9 @@ function Ability:remains()
 			return 0
 		end
 		if id == self.spellId or id == self.spellId2 then
+			if expires == 0 then
+				return 600 -- infinite duration
+			end
 			return max(expires - var.time - var.cast_remains, 0)
 		end
 	end
@@ -1137,7 +1140,7 @@ local function CreateOverlayGlows()
 end
 
 local function UpdateGlows()
-	local glow, icon
+	local glow, icon, i
 	for i = 1, #glows do
 		glow = glows[i]
 		icon = glow.button.icon:GetTexture()
